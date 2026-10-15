@@ -291,8 +291,44 @@ function applyTheme(){
   document.documentElement.style.setProperty('--c-accent', s.accent || '#facc15');
   document.documentElement.style.setProperty('--c-soft', lighten(p,86));
 }
+function formatImgUrl(url){
+  if(!url) return '';
+  url = String(url).trim();
+  if(url.startsWith('data:') || url.startsWith('blob:')) return url;
+  
+  // แปลงลิงก์ Google Drive ทุกรูปแบบให้เป็น Thumbnail endpoint ความละเอียดสูงที่แสดงผลในแท็ก img ได้
+  const m = url.match(/id=([a-zA-Z0-9_-]+)/) || url.match(/\/d\/([a-zA-Z0-9_-]+)/);
+  if(m && m[1]){
+    return `https://drive.google.com/thumbnail?id=${m[1]}&sz=w1200`;
+  }
+  return url;
+}
+
+function handleImgError(el){
+  const original = el.getAttribute('src') || '';
+  const m = original.match(/id=([a-zA-Z0-9_-]+)/) || original.match(/\/d\/([a-zA-Z0-9_-]+)/);
+  if(m && m[1] && !el.dataset.fallback){
+    el.dataset.fallback = '1';
+    el.src = `https://lh3.googleusercontent.com/d/${m[1]}=w1200`;
+    return;
+  }
+  const sizeCls = Array.from(el.classList).filter(c => c.startsWith('w-') || c.startsWith('h-') || c.startsWith('text-')).join(' ') || 'w-11 h-11 text-xl';
+  el.outerHTML = `<div class="${sizeCls} flex items-center justify-center rounded-xl shrink-0" style="background:var(--c-soft);color:var(--c-primary)"><i class="fa-solid fa-graduation-cap"></i></div>`;
+}
+
+function handleNewsImgError(el){
+  const original = el.getAttribute('src') || '';
+  const m = original.match(/id=([a-zA-Z0-9_-]+)/) || original.match(/\/d\/([a-zA-Z0-9_-]+)/);
+  if(m && m[1] && !el.dataset.fallback){
+    el.dataset.fallback = '1';
+    el.src = `https://lh3.googleusercontent.com/d/${m[1]}=w1200`;
+    return;
+  }
+  el.outerHTML = `<div class="w-full h-28 flex flex-col items-center justify-center rounded-xl bg-slate-100 text-slate-400 border border-slate-200 text-xs gap-1"><i class="fa-regular fa-image text-xl"></i><span>ไม่สามารถแสดงภาพได้</span></div>`;
+}
+
 function logoHtml(sizeCls){
-  if(DB.settings.logo) return `<img src="${DB.settings.logo}" class="${sizeCls} object-contain rounded-xl bg-white" alt="logo">`;
+  if(DB.settings.logo) return `<img src="${formatImgUrl(DB.settings.logo)}" referrerpolicy="no-referrer" class="${sizeCls} object-contain rounded-xl bg-white" alt="logo" onerror="handleImgError(this)">`;
   return `<div class="${sizeCls} flex items-center justify-center rounded-xl" style="background:var(--c-soft);color:var(--c-primary)"><i class="fa-solid fa-graduation-cap"></i></div>`;
 }
 
@@ -709,7 +745,7 @@ function newsCard(n){
     </div>
     ${n.content ? `<p class="mt-3 text-[14px] text-slate-600 whitespace-pre-wrap leading-relaxed">${esc(n.content)}</p>` : ''}
     ${imgs.length ? `<div class="mt-3 grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-2">
-        ${imgs.map((im,i)=>`<img src="${im}" onclick="viewImage('${n.id}',${i})" class="w-full h-28 object-cover rounded-xl border border-slate-200 cursor-pointer hover:opacity-90 transition">`).join('')}
+        ${imgs.map((im,i)=>`<img src="${formatImgUrl(im)}" referrerpolicy="no-referrer" onclick="viewImage('${n.id}',${i})" class="w-full h-28 object-cover rounded-xl border border-slate-200 cursor-pointer hover:opacity-90 transition" onerror="handleNewsImgError(this)">`).join('')}
       </div>` : ''}
     ${files.length ? `<div class="mt-3 flex flex-wrap gap-2">
         ${files.map((f,i)=>`<a href="${f.data || f.url || '#'}" target="_blank" download="${esc(f.name)}" class="chip border border-slate-200 bg-slate-50 text-slate-600 hover:bg-white">
@@ -722,7 +758,7 @@ function viewImage(newsId, idx){
   const n = DB.news.find(x => x.id === newsId);
   if(!n) return;
   Swal.fire({
-    imageUrl:n.images[idx], imageAlt:n.title, title:n.title,
+    imageUrl: formatImgUrl(n.images[idx]), imageAlt:n.title, title:n.title,
     width:760, showConfirmButton:false, showCloseButton:true,
     background:'#fff', backdrop:'rgba(15,23,42,.7)'
   });
@@ -1827,7 +1863,7 @@ function renderSettings(){
           <h3 class="font-bold text-slate-800 mb-3"><i class="fa-solid fa-image text-primary mr-1"></i> โลโก้โรงเรียน</h3>
           <div class="flex flex-col items-center gap-3">
             <div id="logoPreview" class="w-32 h-32 rounded-2xl border-2 border-dashed border-slate-200 flex items-center justify-center overflow-hidden bg-slate-50">
-              ${tmpLogo ? `<img src="${tmpLogo}" class="w-full h-full object-contain p-2">` : `<i class="fa-solid fa-graduation-cap text-4xl text-slate-300"></i>`}
+              ${tmpLogo ? `<img src="${formatImgUrl(tmpLogo)}" referrerpolicy="no-referrer" class="w-full h-full object-contain p-2" onerror="handleImgError(this)">` : `<i class="fa-solid fa-graduation-cap text-4xl text-slate-300"></i>`}
             </div>
             <input type="file" id="logoInput" accept="image/png,image/jpeg,image/jpg,image/webp,image/svg+xml" class="inp !py-2 text-[13px]">
             <div class="flex gap-2">
@@ -1902,10 +1938,16 @@ function saveGasUrl(){
 }
 async function saveLogo(){
   if(!tmpLogo){ Swal.fire({icon:'warning', title:'ยังไม่ได้เลือกรูปโลโก้', ...alertCfg()}); return; }
-  showLoader('กำลังอัปโหลดโลโก้ไปยัง Google Drive...');
+  showLoader('กำลังบันทึกโลโก้...');
   try {
-    const driveUrl = await uploadFileToDrive(tmpLogo, 'school_logo_' + Date.now(), 'image/png');
-    DB.settings.logo = driveUrl;
+    let finalLogo = tmpLogo;
+    const gasUrl = getGasUrl();
+    if(gasUrl){
+      showLoader('กำลังอัปโหลดโลโก้ไปยัง Google Drive...');
+      const uploaded = await uploadFileToDrive(tmpLogo, 'school_logo_' + Date.now(), 'image/png');
+      if(uploaded) finalLogo = uploaded;
+    }
+    DB.settings.logo = finalLogo;
     await saveDB(true);
     hideLoader(); refreshChrome(); toast('บันทึกโลโก้สำเร็จ'); refresh();
   } catch(e) {
