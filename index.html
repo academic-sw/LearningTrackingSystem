@@ -122,7 +122,7 @@ tailwind.config = {
    CONFIG & GAS INTEGRATION
    ========================================================= */
 // สามารถวาง Google Apps Script Web App URL ที่ได้จากการ Deploy ที่นี่ หรือใส่ผ่านเมนู "ตั้งค่าระบบ"
-const DEFAULT_GAS_URL = "https://script.google.com/macros/s/AKfycbzVKxf_aJZW64mCN4n9UIHb8lK7veS1EViq498Eotd1PbT5_ffpfwN7ivkmMcf-K8a1/exec"; 
+const DEFAULT_GAS_URL = "https://script.google.com/macros/s/AKfycbxZSlWG6BIFF59vFP4ao2W3NAZ_trZ1xPgMwMQNuOocRz7O2-lO1kVIW9AUw8uMiylz/exec"; 
 
 const $  = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => Array.from(r.querySelectorAll(s));
@@ -166,7 +166,8 @@ function readFiles(input, cb){
    ========================================================= */
 const LS_DB='swm_db_v1', LS_SESSION='swm_session', LS_REMEMBER='swm_remember', LS_GAS='swm_gas_url';
 let DB, session = null, route = 'home', chartInst = null, homePage = 1;
-
+const LS_DIRTY='swm_dirty', LS_SYNCED='swm_synced';
+let syncChain = Promise.resolve();
 function getGasUrl(){
   return localStorage.getItem(LS_GAS) || DEFAULT_GAS_URL;
 }
@@ -202,37 +203,62 @@ function saveDBLocal(){
 }
 
 // บันทึกและซิงค์กับ Google Sheets อัตโนมัติ (เบื้องหลัง)
-async function saveDB(syncToGas = true){
-  saveDBLocal();
-  if(!syncToGas) return;
-  const gasUrl = getGasUrl();
-  if(!gasUrl) return;
 
-  try {
-    // ส่งข้อมูลแบบ no-cors หรือผ่าน text/plain เพื่อเลี่ยงปัญหา preflight CORS
-    fetch(gasUrl, {
-      method: 'POST',
-      mode: 'no-cors',
-      headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-      body: JSON.stringify({
-        action: 'syncAll',
-        data: DB
-      })
-    }).catch(err => console.log('GAS sync silent error:', err));
-  } catch(e) {
-    console.error('Failed to sync to GAS:', e);
-  }
-}
 
 // ดึงข้อมูลล่าสุดจาก Google Sheets
+// สร้าง payload (ตัด base64 ที่ใหญ่เกินเซลล์ Sheets ออก)
+function buildSyncPayload(){
+  return JSON.stringify({action:'syncAll', data: DB}, (k, v) =>
+    (typeof v === 'string' && v.startsWith('data:') && v.length > 40000) ? '' : v);
+}
+
+// ส่งข้อมูลทั้งหมดไป Sheet แล้วตรวจผลลัพธ์จริง
+async function pushToGAS(){
+  const gasUrl = getGasUrl();
+  if(!gasUrl) return false;
+  const res = await fetch(gasUrl, { method:'POST', body: buildSyncPayload() });
+  const json = await res.json();
+  if(json.status !== 'success') throw new Error(json.message || 'sync failed');
+  localStorage.removeItem(LS_DIRTY);
+  localStorage.setItem(LS_SYNCED, '1');
+  return true;
+}
+
+// บันทึกในเครื่อง + ซิงค์ Sheet แบบเรียงคิว
+function saveDB(syncToGas = true){
+  saveDBLocal();
+  if(!syncToGas || !getGasUrl()) return Promise.resolve(true);
+  localStorage.setItem(LS_DIRTY, '1');
+  syncChain = syncChain
+    .then(pushToGAS)
+    .then(() => true)
+    .catch(err => {
+      console.error('GAS sync error:', err);
+      Swal.fire({icon:'warning', title:'บันทึกลง Google Sheet ไม่สำเร็จ',
+        text:'ข้อมูลถูกเก็บในเครื่องแล้ว จะลองซิงค์ใหม่ในครั้งถัดไป (' + err.message + ')', ...alertCfg()});
+      return false;
+    });
+  return syncChain;
+}
+
+// ดึงข้อมูลจาก Google Sheets
 async function fetchFromGAS(manual = false){
   const gasUrl = getGasUrl();
   if(!gasUrl){
     if(manual) Swal.fire({icon:'info', title:'ยังไม่ได้เชื่อมต่อ Google Sheet', text:'กรุณาใส่ Web App URL ในเมนู "ตั้งค่าระบบ"', ...alertCfg()});
     return;
   }
-  if(manual) showLoader('กำลังดึงข้อมูลจาก Google Sheet...');
+  if(manual) showLoader('กำลังซิงค์ข้อมูลกับ Google Sheet...');
   try {
+    const hasLocal = DB.records.length || DB.news.length || DB.subjects.length;
+    const needPush = localStorage.getItem(LS_DIRTY) === '1' ||
+                     (!localStorage.getItem(LS_SYNCED) && hasLocal);
+    if(needPush){
+      await pushToGAS();
+      if(manual) toast('ส่งข้อมูลในเครื่องขึ้น Google Sheet สำเร็จ');
+      return;
+    }
+
     const res = await fetch(`${gasUrl}?action=getAll`);
     const json = await res.json();
     if(json && json.status === 'success' && json.data){
@@ -240,45 +266,43 @@ async function fetchFromGAS(manual = false){
       if(d.settings && Object.keys(d.settings).length) DB.settings = Object.assign(DB.settings, d.settings);
       if(d.semesters && d.semesters.length) DB.semesters = d.semesters;
       if(d.levels && d.levels.length) DB.levels = d.levels;
-      if(d.subjects && d.subjects.length) DB.subjects = d.subjects;
+      if(d.subjects) DB.subjects = d.subjects;
       if(d.users && d.users.length) DB.users = d.users;
       if(d.records) DB.records = d.records;
       if(d.news) DB.news = d.news;
+      localStorage.setItem(LS_SYNCED, '1');
       saveDBLocal();
       applyTheme();
       refreshChrome();
       refresh();
       if(manual) toast('ดึงข้อมูลจาก Google Sheet สำเร็จ');
+    } else if(manual){
+      Swal.fire({icon:'error', title:'Apps Script ตอบกลับผิดพลาด', text: (json && json.message) || 'ไม่ทราบสาเหตุ', ...alertCfg()});
     }
   } catch(e) {
     console.warn('Error fetching from GAS:', e);
-    if(manual) Swal.fire({icon:'error', title:'ดึงข้อมูลไม่สำเร็จ', text:'ไม่สามารถเชื่อมต่อ Google Apps Script ได้ กรุณาตรวจสอบ URL หรือสิทธิ์การเข้าถึง', ...alertCfg()});
+    if(manual) Swal.fire({icon:'error', title:'เชื่อมต่อไม่สำเร็จ',
+      text:'ตรวจสอบ URL และตั้งสิทธิ์ Deploy เป็น "Anyone" (' + e.message + ')', ...alertCfg()});
   } finally {
     if(manual) hideLoader();
   }
 }
 
-// อัปโหลดไฟล์ไปยัง Google Drive Folder ผ่าน Apps Script
+// อัปโหลดไฟล์ไป Google Drive
 async function uploadFileToDrive(base64Data, fileName, mimeType){
   const gasUrl = getGasUrl();
-  if(!gasUrl) return base64Data; // หากยังไม่ได้ต่อ GAS ให้คืนค่า base64 เดิม
+  if(!gasUrl) return base64Data;
   try {
     const res = await fetch(gasUrl, {
       method: 'POST',
-      body: JSON.stringify({
-        action: 'uploadFile',
-        base64Data,
-        fileName,
-        mimeType
-      })
+      body: JSON.stringify({ action:'uploadFile', base64Data, fileName, mimeType })
     });
     const json = await res.json();
-    if(json && json.fileUrl){
-      return json.fileUrl;
-    }
-    return base64Data;
+    if(json && json.status === 'success' && json.fileUrl) return json.fileUrl;
+    throw new Error((json && json.message) || 'upload failed');
   } catch(e) {
     console.warn('Upload to Drive failed, fallback to base64:', e);
+    toast('อัปโหลดขึ้น Drive ไม่สำเร็จ (' + e.message + ')', 'warning');
     return base64Data;
   }
 }
